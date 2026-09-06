@@ -1,0 +1,73 @@
+name: Build Peanut-GB UF2 for RP2040
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build UF2 Firmware
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Install Build Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential pkg-config python3 git
+    
+    - name: Clone Pico SDK
+      run: |
+        git clone --depth 1 https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
+        cd ~/pico-sdk
+        git submodule update --init --depth 1
+        echo "PICO_SDK_PATH=$HOME/pico-sdk" >> $GITHUB_ENV
+    
+    - name: Create Build Directory
+      run: mkdir -p build
+    
+    - name: Configure CMake
+      run: |
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Release -DPICO_SDK_PATH=$PICO_SDK_PATH ..
+    
+    - name: Build Project
+      run: |
+        cd build
+        make -j4
+    
+    - name: Upload UF2 Artifact
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: peanut_gb_emulator_uf2
+        path: build/peanut_gb_emulator.uf2
+        retention-days: 90
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: peanut_gb_emulator_uf2
+        path: ./release
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: release/peanut_gb_emulator.uf2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
