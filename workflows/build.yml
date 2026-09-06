@@ -1,0 +1,210 @@
+name: Build Peanut-GB UF2 for RP2040
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly build
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build UF2 Firmware
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Install Build Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          gcc-arm-none-eabi \
+          libnewlib-arm-none-eabi \
+          build-essential \
+          pkg-config \
+          python3 \
+          git
+        
+        # Verify toolchain
+        arm-none-eabi-gcc --version
+        cmake --version
+    
+    - name: Clone Pico SDK
+      run: |
+        git clone --depth 1 https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
+        cd ~/pico-sdk
+        git submodule update --init --depth 1
+        echo "PICO_SDK_PATH=$HOME/pico-sdk" >> $GITHUB_ENV
+    
+    - name: Create Build Directory
+      run: |
+        mkdir -p build
+        cd build
+        echo "BUILD_DIR=$(pwd)" >> $GITHUB_ENV
+    
+    - name: Configure CMake
+      run: |
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Release \
+               -DPICO_SDK_PATH=$PICO_SDK_PATH \
+               -DCMAKE_VERBOSE_MAKEFILE=ON \
+               ..
+    
+    - name: Build Project
+      run: |
+        cd build
+        make -j4 VERBOSE=1
+      continue-on-error: false
+    
+    - name: Verify Build Artifacts
+      run: |
+        echo "=== Build Artifacts ==="
+        ls -lh build/
+        echo ""
+        echo "=== UF2 File Details ==="
+        if [ -f build/peanut_gb_emulator.uf2 ]; then
+          ls -lh build/peanut_gb_emulator.uf2
+          file build/peanut_gb_emulator.uf2
+          hexdump -C build/peanut_gb_emulator.uf2 | head -20
+        else
+          echo "ERROR: UF2 file not found!"
+          exit 1
+        fi
+    
+    - name: Upload UF2 Artifact
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: peanut_gb_emulator_uf2
+        path: build/peanut_gb_emulator.uf2
+        retention-days: 90
+        compression-level: 0
+    
+    - name: Upload ELF Artifact (for debugging)
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: peanut_gb_emulator_elf
+        path: build/peanut_gb_emulator.elf
+        retention-days: 30
+    
+    - name: Upload Build Logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: build_logs
+        path: build/
+        retention-days: 7
+
+  lint:
+    runs-on: ubuntu-latest
+    name: Code Quality Checks
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Install Lint Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cppcheck clang-format
+    
+    - name: Run cppcheck
+      run: |
+        cppcheck --enable=all --suppress=missingIncludeSystem src/ include/ || true
+    
+    - name: Check Code Formatting (clang-format)
+      run: |
+        for file in src/**/*.c src/**/*.h include/**/*.h; do
+          if [ -f "$file" ]; then
+            clang-format --dry-run -Werror "$file" || echo "Format check: $file"
+          fi
+        done || true
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Download UF2 Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: peanut_gb_emulator_uf2
+        path: ./release
+    
+    - name: Download ELF Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: peanut_gb_emulator_elf
+        path: ./release
+    
+    - name: Get Release Info
+      id: release_info
+      run: |
+        echo "tag_name=$(echo $GITHUB_REF | sed 's/refs\/tags\///')" >> $GITHUB_OUTPUT
+        echo "release_date=$(date -u +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          release/peanut_gb_emulator.uf2
+          release/peanut_gb_emulator.elf
+        body: |
+          # Peanut-GB RP2040 Release ${{ steps.release_info.outputs.tag_name }}
+          
+          **Release Date:** ${{ steps.release_info.outputs.release_date }}
+          
+          ## Files Included
+          - `peanut_gb_emulator.uf2` - Ready-to-flash UF2 file for Raspberry Pi Pico
+          - `peanut_gb_emulator.elf` - ELF binary for debugging
+          
+          ## Installation
+          1. Hold BOOTSEL button on Raspberry Pi Pico
+          2. Connect USB cable
+          3. Copy `peanut_gb_emulator.uf2` to the RPI-RP2 drive
+          4. Pico will reboot automatically
+          
+          ## Hardware
+          - Waveshare GamePi13 HAT with ST7789V display
+          - 8 game buttons (directional + action buttons)
+          - 240x240 RGB565 color display
+          
+          ## Troubleshooting
+          See [SETUP.md](https://github.com/Grid75/peanut-gb-rp2040-st7789v/blob/main/SETUP.md) for detailed troubleshooting.
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  status:
+    needs: [build, lint]
+    runs-on: ubuntu-latest
+    name: Build Status
+    if: always()
+    
+    steps:
+    - name: Check Build Status
+      run: |
+        echo "=== Build Pipeline Status ==="
+        echo "Build Job: ${{ needs.build.result }}"
+        echo "Lint Job: ${{ needs.lint.result }}"
+        
+        if [ "${{ needs.build.result }}" = "success" ]; then
+          echo "✅ Build successful!"
+        else
+          echo "❌ Build failed!"
+          exit 1
+        fi
