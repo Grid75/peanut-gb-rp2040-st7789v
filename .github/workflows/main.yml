@@ -1,0 +1,141 @@
+name: Build Peanut-GB UF2 for RP2040
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly build
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build UF2 Firmware
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Install Build Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          gcc-arm-none-eabi \
+          libnewlib-arm-none-eabi \
+          build-essential \
+          pkg-config \
+          python3 \
+          git
+        
+        arm-none-eabi-gcc --version
+        cmake --version
+    
+    - name: Clone Pico SDK
+      run: |
+        git clone --depth 1 https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
+        cd ~/pico-sdk
+        git submodule update --init --depth 1
+        echo "PICO_SDK_PATH=$HOME/pico-sdk" >> $GITHUB_ENV
+    
+    - name: Create Build Directory
+      run: mkdir -p build
+    
+    - name: Configure CMake
+      run: |
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Release \
+               -DPICO_SDK_PATH=$PICO_SDK_PATH \
+               -DCMAKE_VERBOSE_MAKEFILE=ON \
+               ..
+    
+    - name: Build Project
+      run: |
+        cd build
+        make -j4 VERBOSE=1
+    
+    - name: Verify Build Artifacts
+      run: |
+        ls -lh build/peanut_gb_emulator.uf2
+        file build/peanut_gb_emulator.uf2
+    
+    - name: Upload UF2 Artifact
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: peanut_gb_emulator_uf2
+        path: build/peanut_gb_emulator.uf2
+        retention-days: 90
+    
+    - name: Upload ELF Artifact
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: peanut_gb_emulator_elf
+        path: build/peanut_gb_emulator.elf
+        retention-days: 30
+
+  lint:
+    runs-on: ubuntu-latest
+    name: Code Quality Checks
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Install Lint Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cppcheck clang-format
+    
+    - name: Run cppcheck
+      run: cppcheck --enable=all --suppress=missingIncludeSystem src/ include/ || true
+    
+    - name: Check Code Formatting
+      run: find src include -name '*.c' -o -name '*.h' | xargs clang-format --dry-run -Werror || true
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Download UF2 Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: peanut_gb_emulator_uf2
+        path: ./release
+    
+    - name: Download ELF Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: peanut_gb_emulator_elf
+        path: ./release
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          release/peanut_gb_emulator.uf2
+          release/peanut_gb_emulator.elf
+        body: |
+          # Peanut-GB RP2040 Release ${{ github.ref_name }}
+          
+          Ready-to-flash UF2 firmware for Raspberry Pi Pico with Waveshare GamePi13.
+          
+          ## Installation
+          1. Hold BOOTSEL button on Pico
+          2. Connect USB
+          3. Copy `peanut_gb_emulator.uf2` to RPI-RP2 drive
+          
+          See [SETUP.md](./SETUP.md) for details.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
